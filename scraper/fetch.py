@@ -292,12 +292,30 @@ class TccSearchRecorder:
 
     # -- session ----------------------------------------------------------
     def _enter_site(self, page) -> None:
-        page.goto(f"{REC_BASE}/", wait_until="domcontentloaded", timeout=45000)
+        """Load the welcome page and acknowledge the disclaimer. The
+        acknowledgement is session-bound; without it SearchEntry.aspx
+        bounces back to the welcome page (no doc-type list)."""
+        page.goto(f"{REC_BASE}/", wait_until="domcontentloaded", timeout=60000)
         try:
-            page.click("text=acknowledge the disclaimer", timeout=8000)
-            page.wait_for_load_state("domcontentloaded", timeout=15000)
+            link = page.locator("a", has_text=re.compile("acknowledge", re.I)).first
+            link.wait_for(state="visible", timeout=25000)
+            link.click()
+            page.wait_for_load_state("domcontentloaded", timeout=20000)
         except Exception:
-            pass  # some sessions land straight on the tabs
+            # fallback: click via JS in case of overlay/timing issues
+            try:
+                page.evaluate(
+                    "()=>{const a=[...document.querySelectorAll('a')]"
+                    ".find(x=>/acknowledge/i.test(x.textContent));"
+                    "if(a)a.click();}")
+                page.wait_for_timeout(2500)
+            except Exception:
+                pass
+        try:
+            log.info("tccsearch entered: title=%r", page.title())
+        except Exception:
+            pass
+        page.wait_for_timeout(800)
 
     # -- one doc-type search ----------------------------------------------
     def _fill_date(self, page, container_id: str, value: str) -> None:
@@ -308,8 +326,21 @@ class TccSearchRecorder:
         page.wait_for_timeout(200)
 
     def _run_search(self, page, code: str, start: datetime, end: datetime) -> bool:
-        page.goto(REC_ENTRY, wait_until="domcontentloaded", timeout=45000)
-        page.wait_for_selector("#cphNoMargin_f_dclDocType", timeout=30000)
+        page.goto(REC_ENTRY, wait_until="domcontentloaded", timeout=60000)
+        try:
+            page.wait_for_selector("#cphNoMargin_f_dclDocType", timeout=30000)
+        except Exception:
+            # Session not acknowledged (bounced to welcome) or slow load:
+            # log what we actually got, re-enter, and try once more.
+            try:
+                body = page.inner_text("body")[:200].replace("\n", " ")
+                log.warning("tccsearch entry page unexpected (title=%r): %s",
+                            page.title(), body)
+            except Exception:
+                pass
+            self._enter_site(page)
+            page.goto(REC_ENTRY, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_selector("#cphNoMargin_f_dclDocType", timeout=30000)
         cb = page.locator(f"#cphNoMargin_f_dclDocType input[value='{code}']")
         if not cb.count():
             log.warning("tccsearch: doc-type checkbox %r not found", code)
@@ -463,17 +494,28 @@ class TccSearchRecorder:
             browser = pw.chromium.launch(headless=True)
             for code, label, cat, cat_label, days in REC_DOC_TYPES:
                 start = self.end - timedelta(days=days)
-                ctx = browser.new_context(
-                    user_agent=self._UA,
-                    viewport={"width": 1500, "height": 900})
-                page = ctx.new_page()
-                try:
+                for attempt in (1, 2):
+                    ctx = browser.new_context(
+                        user_agent=self._UA,
+                        viewport={"width": 1500, "height": 900})
+                    page = ctx.new_page()
+                    try:
+                        self._search_one_type(page, code, label, cat,
+                                              cat_label, start, records)
+                        ctx.close()
+                        break
+                    except Exception as exc:
+                        log.warning("tccsearch %s attempt %d failed: %s",
+                                    label, attempt, exc)
+                        ctx.close()
+                        time.sleep(3)
+        return records
+
+    def _search_one_type(self, page, code, label, cat, cat_label,
+                         start, records) -> None:
                     self._enter_site(page)
                     if not self._run_search(page, code, start, self.end):
-                        log.warning("tccsearch %-18s: search did not reach "
-                                    "results", code)
-                        ctx.close()
-                        continue
+                        raise RuntimeError("search did not reach results")
                     rows = self._paginate(page)
                     lab_u = label.upper()
                     typed = [r for r in rows if r["row_type"]
@@ -529,11 +571,6 @@ class TccSearchRecorder:
                             log.debug("FC detail %s failed: %s", rec.doc_num, exc)
                     log.info("tccsearch %-18s: %d records (%d FC owners from "
                              "detail)", label, n, got)
-                except Exception as exc:
-                    log.warning("tccsearch search %s failed: %s", label, exc)
-                finally:
-                    ctx.close()
-        return records
 
 # ---------------------------------------------------------------------------
 # TCAD parcel enrichment (Travis County GIS public ArcGIS)
