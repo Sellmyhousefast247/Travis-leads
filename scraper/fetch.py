@@ -640,20 +640,49 @@ def _geo_from_account(acct: str) -> str:
 def fetch_realauction_records(session) -> list:
     """Scrape the public 'Preview Items For Sale' pages on
     travis.texas.realforeclose.com for recent + upcoming tax-foreclosure
-    auctions. Each .AUCTION_ITEM block carries Sale Type, Cause Number,
+    auctions. The .AUCTION_ITEM blocks are rendered by the page's own
+    JavaScript (a raw GET returns an empty shell), so the pages are
+    loaded with Playwright. Each block carries Sale Type, Cause Number,
     Precinct/Sale Number, Adjudged Value, Est. Min. Bid, Account Number
     (TCAD), and Property Address. Never raises."""
     records = []
     try:
-        for d in _first_tuesdays():
-            url = REALAUCTION_URL.format(date=d.strftime("%m/%d/%Y"))
-            try:
-                r = session.get(url, timeout=REQUEST_TIMEOUT)
-            except Exception as exc:
-                log.warning("RealAuction %s fetch failed: %s",
-                            d.strftime("%m/%d/%Y"), exc)
-                continue
-            soup = BeautifulSoup(r.text, "lxml")
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                user_agent=TccSearchRecorder._UA,
+                viewport={"width": 1400, "height": 900})
+            page = ctx.new_page()
+            for d in _first_tuesdays():
+                url = REALAUCTION_URL.format(date=d.strftime("%m/%d/%Y"))
+                try:
+                    page.goto(url, wait_until="domcontentloaded",
+                              timeout=45000)
+                    try:
+                        page.wait_for_selector(".AUCTION_ITEM",
+                                               timeout=12000)
+                    except Exception:
+                        pass  # genuinely empty auction dates stay empty
+                    html = page.content()
+                except Exception as exc:
+                    log.warning("RealAuction %s fetch failed: %s",
+                                d.strftime("%m/%d/%Y"), exc)
+                    continue
+                records.extend(
+                    _parse_realauction_page(html, d, url))
+                time.sleep(0.4)
+            ctx.close()
+            browser.close()
+    except Exception as exc:
+        log.warning("RealAuction source failed (skipping): %s", exc)
+    return records
+
+
+def _parse_realauction_page(html: str, d, url: str) -> list:
+    records = []
+    if True:
+        if True:
+            soup = BeautifulSoup(html, "lxml")
             items = soup.select(".AUCTION_ITEM")
             n = 0
             for it in items:
@@ -694,9 +723,6 @@ def fetch_realauction_records(session) -> list:
                 n += 1
             log.info("RealAuction %s: %d sale items",
                      d.strftime("%m/%d/%Y"), n)
-            time.sleep(0.4)
-    except Exception as exc:
-        log.warning("RealAuction source failed (skipping): %s", exc)
     return records
 
 
