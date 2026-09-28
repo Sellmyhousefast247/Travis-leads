@@ -118,8 +118,36 @@ TCAD_BY_SITUS = {
 }
 
 
+def fake_realauction(session):
+    # shaped from the live 10/06/2026 preview page
+    return [F.LeadRecord(
+        doc_num="TAXFC-GN22003427-/2", doc_type="TAX FORECLOSURE SALE",
+        cat="TAXFC", cat_label="Tax Sale 2026-10-06", filed="2026-10-06",
+        amount=79997.0, legal="Cause GN22003427; TCAD account 03434606010000",
+        prop_address="14601 Alps", prop_city="Del Valle", prop_zip="78617",
+        clerk_url="https://travis.texas.realforeclose.com/",
+        geo_id="0343460601")]
+
+
+TCAD_BY_GEO = {
+    "0343460601": {
+        "py_owner_name": "VACEK JOSEPH",
+        "py_address": "PO BOX 141534 AUSTIN TX 78714",
+        "situs_num": "14601", "situs_street_prefx": None,
+        "situs_street": "ALPS", "situs_street_suffix": None,
+        "situs_city": "DEL VALLE", "situs_zip": "78617",
+        "situs_address": "14601 ALPS DEL VALLE 78617",
+        "market_value": 79997, "PROP_ID": 700001,
+    },
+}
+
+
 def fake_arcgis_query(session, where, count=5):
     import re
+    m = re.search(r"geo_id = '([^']+)'", where)
+    if m:
+        att = TCAD_BY_GEO.get(m.group(1))
+        return [{"attributes": att}] if att else []
     m = re.search(r"py_owner_name\) LIKE '([^']+)%'", where)
     if m:
         att = TCAD_BY_OWNER.get(m.group(1))
@@ -140,6 +168,8 @@ def run():
 
     with mock.patch.object(F.TccSearchRecorder, "run",
                            lambda self: fake_recorder_records()), \
+         mock.patch.object(F, "fetch_realauction_records", fake_realauction), \
+         mock.patch.object(F, "fetch_resale_records", lambda s: []), \
          mock.patch.object(F, "_arcgis_query", fake_arcgis_query), \
          mock.patch.object(sys, "argv", ["fetch.py"]):
         F.main()
@@ -154,7 +184,7 @@ def run():
         assert k in rj, f"missing top-level key {k}"
     assert rj["county"] == "Travis"
     assert set(rj["date_range"]) == {"start", "end"}
-    assert rj["total"] == 5, f"dedupe failed: total={rj['total']}"
+    assert rj["total"] == 6, f"dedupe failed: total={rj['total']}"
 
     cats = {"foreclosure", "tax_lien", "judgment", "probate"}
     req = ("status first_seen cat cat_code cat_label doc_type score flags "
@@ -222,9 +252,17 @@ def run():
     state = json.loads(sp.read_text())
     assert len(state) == rj["total"]
 
+    # geo_id exact join filled owner + mailing on the RealAuction record
+    tf = by_num["TAXFC-GN22003427-/2"]
+    assert tf["owner"] == "VACEK JOSEPH", tf["owner"]
+    assert tf["mail_address"] == "Po Box 141534"
+    assert tf["cat"] == "foreclosure"  # TAXFC maps to foreclosure
+
     # second run -> EXISTING
     with mock.patch.object(F.TccSearchRecorder, "run",
                            lambda self: fake_recorder_records()), \
+         mock.patch.object(F, "fetch_realauction_records", fake_realauction), \
+         mock.patch.object(F, "fetch_resale_records", lambda s: []), \
          mock.patch.object(F, "_arcgis_query", fake_arcgis_query), \
          mock.patch.object(sys, "argv", ["fetch.py"]):
         F.main()

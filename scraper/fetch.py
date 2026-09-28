@@ -69,6 +69,11 @@ REC_RESULTS = f"{REC_BASE}/RealEstate/SearchResults.aspx"
 PARCEL_API_URL = ("https://gis.traviscountytx.gov/server1/rest/services/"
                   "Boundaries_and_Jurisdictions/TCAD/MapServer/0/query")
 
+REALAUCTION_URL = ("https://travis.texas.realforeclose.com/index.cfm"
+                   "?zaction=AUCTION&Zmethod=PREVIEW&AUCTIONDATE={date}")
+RESALE_XLSX_URL = ("https://tax-office.traviscountytx.gov/~tax/pages/"
+                   "foreclosure/resales/ResaleList.xlsx")
+
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "7"))
 LIEN_LOOKBACK_DAYS = 30      # liens / LP / FC notices trickle in slower
 PRO_LOOKBACK_DAYS = 60       # probate/heirship: 60-day window
@@ -135,6 +140,7 @@ class LeadRecord:
     first_seen: str = ""
     rid: str = ""
     content_hash: str = ""
+    geo_id: str = ""          # TCAD Geographic ID for exact parcel join
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -265,7 +271,8 @@ def parse_us_address_tail(s: str) -> tuple:
             s = s[: last.end()].strip()
         else:
             parts = s.rsplit(" ", 1)
-            if len(parts) == 2 and not parts[1].isdigit() and len(parts[1]) > 2:
+            if (len(parts) == 2 and not parts[1].isdigit()
+                    and len(parts[1]) > 2 and re.search(r"[A-Za-z]", parts[0])):
                 s, city = parts[0], parts[1]
     return s.title(), city.title(), st, zp
 
@@ -280,6 +287,11 @@ def address_from_legal(legal: str) -> tuple:
 # ---------------------------------------------------------------------------
 # tccsearch.org recorder scraper (Playwright)
 # ---------------------------------------------------------------------------
+class CloudflareBlocked(RuntimeError):
+    """tccsearch.org served its bot-verification page; the recorder is
+    unreachable from this network (GitHub runner IPs are challenged)."""
+
+
 class TccSearchRecorder:
     _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
            "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -312,7 +324,20 @@ class TccSearchRecorder:
             except Exception:
                 pass
         try:
-            log.info("tccsearch entered: title=%r", page.title())
+            title = page.title()
+            log.info("tccsearch entered: title=%r", title)
+            if "just a moment" in (title or "").lower():
+                # Cloudflare bot-verification interstitial. Give the
+                # automatic check a short window, then treat the recorder
+                # as unavailable from this network. We do not attempt to
+                # defeat bot detection.
+                page.wait_for_timeout(12000)
+                if "just a moment" in (page.title() or "").lower():
+                    raise CloudflareBlocked(
+                        "tccsearch.org is behind Cloudflare bot "
+                        "verification from this IP")
+        except CloudflareBlocked:
+            raise
         except Exception:
             pass
         page.wait_for_timeout(800)
@@ -492,7 +517,10 @@ class TccSearchRecorder:
         records = []
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
+            cf_blocked = False
             for code, label, cat, cat_label, days in REC_DOC_TYPES:
+                if cf_blocked:
+                    break
                 start = self.end - timedelta(days=days)
                 for attempt in (1, 2):
                     ctx = browser.new_context(
@@ -503,6 +531,13 @@ class TccSearchRecorder:
                         self._search_one_type(page, code, label, cat,
                                               cat_label, start, records)
                         ctx.close()
+                        break
+                    except CloudflareBlocked as exc:
+                        log.warning("tccsearch recorder unavailable (%s); "
+                                    "skipping remaining doc types -- open "
+                                    "sources still run", exc)
+                        ctx.close()
+                        cf_blocked = True
                         break
                     except Exception as exc:
                         log.warning("tccsearch %s attempt %d failed: %s",
@@ -573,6 +608,175 @@ class TccSearchRecorder:
                              "detail)", label, n, got)
 
 # ---------------------------------------------------------------------------
+# Travis County tax-foreclosure sales (RealAuction, open preview pages)
+# ---------------------------------------------------------------------------
+def _first_tuesdays(back_months: int = 1, ahead_months: int = 3) -> list:
+    """Texas judicial/tax sales are the first Tuesday of the month."""
+    out = []
+    today = datetime.now()
+    y, m = today.year, today.month
+    m -= back_months
+    while m < 1:
+        m += 12
+        y -= 1
+    for _ in range(back_months + ahead_months + 1):
+        d = datetime(y, m, 1)
+        while d.weekday() != 1:          # Tuesday
+            d += timedelta(days=1)
+        out.append(d)
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    return out
+
+
+def _geo_from_account(acct: str) -> str:
+    """RealAuction 'Account Number' is the 14-digit TCAD account; the
+    first 10 digits are the TCAD Geographic ID used by the parcel layer."""
+    a = re.sub(r"\D", "", acct or "")
+    return a[:10] if len(a) >= 10 else ""
+
+
+def fetch_realauction_records(session) -> list:
+    """Scrape the public 'Preview Items For Sale' pages on
+    travis.texas.realforeclose.com for recent + upcoming tax-foreclosure
+    auctions. Each .AUCTION_ITEM block carries Sale Type, Cause Number,
+    Precinct/Sale Number, Adjudged Value, Est. Min. Bid, Account Number
+    (TCAD), and Property Address. Never raises."""
+    records = []
+    try:
+        for d in _first_tuesdays():
+            url = REALAUCTION_URL.format(date=d.strftime("%m/%d/%Y"))
+            try:
+                r = session.get(url, timeout=REQUEST_TIMEOUT)
+            except Exception as exc:
+                log.warning("RealAuction %s fetch failed: %s",
+                            d.strftime("%m/%d/%Y"), exc)
+                continue
+            soup = BeautifulSoup(r.text, "lxml")
+            items = soup.select(".AUCTION_ITEM")
+            n = 0
+            for it in items:
+                txt = _norm_ws(it.get_text(" "))
+                def fld(name):
+                    m = re.search(
+                        name + r":\s*(.*?)(?=\s+[A-Z][a-zA-Z/ .]+:|$)", txt)
+                    return _norm_ws(m.group(1)) if m else ""
+                cause = fld("Cause Number")
+                if not cause:
+                    continue
+                salenum = fld("Precinct/Sale Number").replace(" ", "")
+                acct = fld("Account Number")
+                addr_raw = fld("Property Address")
+                status_m = re.search(r"Auction Status\s+([A-Za-z ]+?)\s+Sale Type",
+                                     txt)
+                sale_status = _norm_ws(status_m.group(1)) if status_m else ""
+                adj = re.sub(r"[^\d.]", "", fld("Adjudged Value")) or "0"
+                ps, pc, pst, pz = parse_us_address_tail(
+                    addr_raw.replace(",", " "))
+                saledate = d.strftime("%Y-%m-%d")
+                rec = LeadRecord(
+                    doc_num=f"TAXFC-{cause}-{salenum or n}",
+                    doc_type="TAX FORECLOSURE SALE",
+                    cat="TAXFC",
+                    cat_label=f"Tax Sale {saledate}"
+                              + (f" ({sale_status})" if sale_status else ""),
+                    filed=saledate,
+                    amount=float(adj or 0),
+                    legal=f"Cause {cause}; TCAD account {acct}"
+                          + (f"; status {sale_status}" if sale_status else ""),
+                    prop_address=ps, prop_city=pc,
+                    prop_state=pst or STATE, prop_zip=pz,
+                    clerk_url=url,
+                    geo_id=_geo_from_account(acct),
+                )
+                records.append(rec)
+                n += 1
+            log.info("RealAuction %s: %d sale items",
+                     d.strftime("%m/%d/%Y"), n)
+            time.sleep(0.4)
+    except Exception as exc:
+        log.warning("RealAuction source failed (skipping): %s", exc)
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Travis County tax office struck-off resale list (open .xlsx)
+# ---------------------------------------------------------------------------
+def fetch_resale_records(session) -> list:
+    """County struck-off (unsold at tax sale) properties offered for
+    resale -- tax-deed style leads. Column layout is sniffed from the
+    header row. Never raises."""
+    records = []
+    try:
+        r = session.get(RESALE_XLSX_URL, timeout=REQUEST_TIMEOUT)
+        if r.status_code != 200 or len(r.content) < 500:
+            log.warning("Resale list: HTTP %s (%d bytes) -- skipped",
+                        r.status_code, len(r.content))
+            return records
+        import io
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(r.content), read_only=True,
+                           data_only=True)
+        ws = wb.active
+        rows = [[_norm_ws(c) for c in row]
+                for row in ws.iter_rows(values_only=True)]
+        hdr_i = next((i for i, row in enumerate(rows)
+                      if sum(1 for c in row if c) >= 3
+                      and any(re.search(r"account|address|cause|property",
+                                        c, re.I) for c in row if c)), None)
+        if hdr_i is None:
+            log.warning("Resale list: header row not found -- skipped")
+            return records
+        hdr = [c.lower() for c in rows[hdr_i]]
+        def col(*pats):
+            for i, h in enumerate(hdr):
+                if h and any(re.search(p, h) for p in pats):
+                    return i
+            return None
+        c_acct = col(r"account")
+        c_addr = col(r"address|situs|property(?! id)")
+        c_cause = col(r"cause")
+        c_val = col(r"value|bid|price|amount")
+        c_zip = col(r"zip")
+        c_city = col(r"city")
+        n = 0
+        for row in rows[hdr_i + 1:]:
+            acct = row[c_acct] if c_acct is not None and c_acct < len(row) else ""
+            addr = row[c_addr] if c_addr is not None and c_addr < len(row) else ""
+            if not (acct or addr):
+                continue
+            cause = row[c_cause] if c_cause is not None and c_cause < len(row) else ""
+            val = row[c_val] if c_val is not None and c_val < len(row) else ""
+            val = re.sub(r"[^\d.]", "", str(val)) or "0"
+            if c_city is not None and c_city < len(row) and row[c_city]:
+                ps, pc = _norm_ws(addr).title(), _norm_ws(row[c_city]).title()
+                pz = _norm_ws(row[c_zip])[:5] if c_zip is not None and c_zip < len(row) else ""
+                pst = STATE
+            else:
+                ps, pc, pst, pz = parse_us_address_tail(
+                    str(addr).replace(",", " "))
+            records.append(LeadRecord(
+                doc_num=f"RESALE-{re.sub(r'[^0-9A-Za-z]', '', str(acct)) or n}",
+                doc_type="TAX RESALE (STRUCK OFF)",
+                cat="TAXDEED", cat_label="County Resale (Struck-off)",
+                filed=datetime.now().strftime("%Y-%m-%d"),
+                amount=float(val or 0),
+                legal=_norm_ws(f"Struck-off resale; cause {cause}; "
+                               f"account {acct}"),
+                prop_address=ps, prop_city=pc,
+                prop_state=pst or STATE, prop_zip=pz,
+                clerk_url=RESALE_XLSX_URL,
+                geo_id=_geo_from_account(str(acct)),
+            ))
+            n += 1
+        log.info("Resale list: %d struck-off properties", n)
+    except Exception as exc:
+        log.warning("Resale list source failed (skipping): %s", exc)
+    return records
+
+
+# ---------------------------------------------------------------------------
 # TCAD parcel enrichment (Travis County GIS public ArcGIS)
 # ---------------------------------------------------------------------------
 PARCEL_FIELDS = ("py_owner_name,py_address,situs_num,situs_street_prefx,"
@@ -632,6 +836,36 @@ def _addr_key(addr: str) -> tuple:
 def enrich_parcels(records: list) -> None:
     session = requests.Session()
     session.headers["User-Agent"] = "TravisLeadScraper/1.0"
+
+    # Pass 0: exact geo_id join (RealAuction / resale records carry the
+    # TCAD account number -> Geographic ID)
+    geo = [r for r in records if r.geo_id and (not r.owner or not r.mail_address)]
+    log.info("TCAD geo_id-join for %d records...", len(geo))
+    hits = 0
+    for rec in geo[:ARCGIS_MAX_LOOKUPS]:
+        feats = _arcgis_query(session, f"geo_id = '{_sql_lit(rec.geo_id)}'")
+        if not feats:
+            continue
+        att = feats[0].get("attributes", {})
+        owner = _arc_val(att.get("py_owner_name"))
+        if owner and not rec.owner:
+            rec.owner = owner
+            hits += 1
+        if not rec.prop_address:
+            ps, pc, pz = _situs_from(att)
+            if ps:
+                rec.prop_address, rec.prop_city, rec.prop_zip = ps, pc or rec.prop_city, pz
+        if not rec.mail_address:
+            ms, mc, mst, mz = _mailing_from(att)
+            if ms:
+                rec.mail_address, rec.mail_city, rec.mail_state, rec.mail_zip = ms, mc, mst, mz
+        if not rec.amount:
+            try:
+                rec.amount = float(att.get("market_value") or 0)
+            except (TypeError, ValueError):
+                pass
+        time.sleep(0.12)
+    log.info("TCAD geo_id-join: %d owner fills", hits)
 
     fwd = [r for r in records if r.owner and (not r.prop_address or not r.mail_address)]
     log.info("TCAD owner-lookup for %d records...", len(fwd))
@@ -873,6 +1107,11 @@ def main() -> None:
     recorder = TccSearchRecorder(end, skip_detail=args.skip_detail)
     records = recorder.run()
 
+    session = requests.Session()
+    session.headers["User-Agent"] = TccSearchRecorder._UA
+    records.extend(fetch_realauction_records(session))
+    records.extend(fetch_resale_records(session))
+
     # dedupe on doc_num
     seen, unique = set(), []
     for r in records:
@@ -898,7 +1137,7 @@ def main() -> None:
     log.info("  With address   : %d", sum(1 for r in records if r.prop_address))
     log.info("  Score >= 70    : %d", sum(1 for r in records if r.score >= 70))
     log.info("  Score >= 50    : %d", sum(1 for r in records if r.score >= 50))
-    for c in ("FC","LP","JUD","LIEN","PRO"):
+    for c in ("FC","TAXFC","TAXDEED","LP","JUD","LIEN","PRO"):
         log.info("  cat %-5s      : %d", c, sum(1 for r in records if r.cat == c))
 
 
