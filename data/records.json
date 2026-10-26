@@ -1,10 +1,10 @@
 {
-  "fetched_at": "2026-10-25T13:09:05.700937",
+  "fetched_at": "2026-10-26T14:52:09.205016",
   "county": "Travis",
   "source": "Travis County, TX -- tccsearch.org Recorder + TCAD Parcels",
   "date_range": {
-    "start": "2026-09-25",
-    "end": "2026-10-25"
+    "start": "2026-09-26",
+    "end": "2026-10-26"
   },
   "total": 11,
   "new_7d": 0,
