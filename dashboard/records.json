@@ -1,10 +1,10 @@
 {
-  "fetched_at": "2026-11-12T20:39:25.592947",
+  "fetched_at": "2026-11-13T20:19:12.925560",
   "county": "Travis",
   "source": "Travis County, TX -- tccsearch.org Recorder + TCAD Parcels",
   "date_range": {
-    "start": "2026-10-13",
-    "end": "2026-11-12"
+    "start": "2026-10-14",
+    "end": "2026-11-13"
   },
   "total": 13,
   "new_7d": 4,
@@ -45,7 +45,7 @@
         "Has address"
       ],
       "score": 78,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-10-10",
       "rid": "b4d8b26d4cf7c35b",
       "content_hash": "2d09cf577a9df2d1",
@@ -80,7 +80,7 @@
         "Has address"
       ],
       "score": 78,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-10-10",
       "rid": "3d4cdae7edf5d3e8",
       "content_hash": "807a7bc3a5912c53",
@@ -115,7 +115,7 @@
         "Has address"
       ],
       "score": 78,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-10-10",
       "rid": "40ae74f2dba3ace7",
       "content_hash": "637e37fcd595aa34",
@@ -150,7 +150,7 @@
         "Has address"
       ],
       "score": 78,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-10-10",
       "rid": "45cc36863add421b",
       "content_hash": "38ddc8dd83387619",
@@ -185,7 +185,7 @@
         "Has address"
       ],
       "score": 78,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-10-10",
       "rid": "792105690f5ec8ee",
       "content_hash": "36e14b1d47bc86af",
@@ -289,7 +289,7 @@
         "Has address"
       ],
       "score": 73,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-09-30",
       "rid": "60199ac1aaf965f2",
       "content_hash": "f64939f07d69cbd2",
@@ -323,7 +323,7 @@
         "Has address"
       ],
       "score": 73,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-09-28",
       "rid": "3a517dbdce494803",
       "content_hash": "b6ec581e53df829c",
