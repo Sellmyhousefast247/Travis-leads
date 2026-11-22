@@ -1,10 +1,10 @@
 {
-  "fetched_at": "2026-11-21T19:56:18.135196",
+  "fetched_at": "2026-11-22T20:08:21.113497",
   "county": "Travis",
   "source": "Travis County, TX -- tccsearch.org Recorder + TCAD Parcels",
   "date_range": {
-    "start": "2026-10-22",
-    "end": "2026-11-21"
+    "start": "2026-10-23",
+    "end": "2026-11-22"
   },
   "total": 13,
   "new_7d": 0,
@@ -45,7 +45,7 @@
         "Has address"
       ],
       "score": 78,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-10-10",
       "rid": "b4d8b26d4cf7c35b",
       "content_hash": "2d09cf577a9df2d1",
@@ -80,7 +80,7 @@
         "Has address"
       ],
       "score": 78,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-10-10",
       "rid": "3d4cdae7edf5d3e8",
       "content_hash": "807a7bc3a5912c53",
@@ -115,7 +115,7 @@
         "Has address"
       ],
       "score": 78,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-10-10",
       "rid": "40ae74f2dba3ace7",
       "content_hash": "637e37fcd595aa34",
@@ -150,7 +150,7 @@
         "Has address"
       ],
       "score": 78,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-10-10",
       "rid": "45cc36863add421b",
       "content_hash": "38ddc8dd83387619",
@@ -185,7 +185,7 @@
         "Has address"
       ],
       "score": 78,
-      "status": "CHANGED",
+      "status": "EXISTING",
       "first_seen": "2026-10-10",
       "rid": "792105690f5ec8ee",
       "content_hash": "36e14b1d47bc86af",
